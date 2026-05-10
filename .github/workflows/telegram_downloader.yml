@@ -57,9 +57,8 @@ jobs:
               for attempt in range(max_retries):
                   try:
                       range_header = {"Range": f"bytes={downloaded}-"} if downloaded > 0 else {}
-                      resp = session.get(url, stream=True, timeout=30, headers=range_header)
+                      resp = session.get(url, stream=True, timeout=60, headers=range_header)
                       
-                      # در صورتی که سرور از Resume پشتیبانی نکرد و از اول فایل را فرستاد
                       if downloaded > 0 and resp.status_code == 200:
                           downloaded = 0
                           mode = 'wb'
@@ -91,7 +90,7 @@ jobs:
                           requests.exceptions.ConnectionError,
                           requests.exceptions.Timeout) as e:
                       print(f"\n⚠️ Connection lost: {e}. Retry {attempt+1}/{max_retries}")
-                      time.sleep(2 ** attempt)
+                      time.sleep(3 ** attempt)
                   except Exception as e:
                       print(f"\n❌ Fatal error: {e}")
                       return False
@@ -100,21 +99,14 @@ jobs:
 
           def download_telegram_file(telegram_link, output_dir="."):
               api_url = "https://telegramdownloader.net/proxy.php"
-              
-              # استفاده از Session برای نگهداری کوکی‌ها
               session = requests.Session()
-              
-              # هدرهای ضروری برای جلوگیری از خطای 400 و شبیه‌سازی مرورگر
               session.headers.update({
                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                   "Accept": "application/json, text/javascript, */*; q=0.01",
                   "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                   "Origin": "https://telegramdownloader.net",
                   "Referer": "https://telegramdownloader.net/",
-                  "X-Requested-With": "XMLHttpRequest",
-                  "Sec-Fetch-Dest": "empty",
-                  "Sec-Fetch-Mode": "cors",
-                  "Sec-Fetch-Site": "same-origin"
+                  "X-Requested-With": "XMLHttpRequest"
               })
               
               data = {"telegram_link": telegram_link}
@@ -122,19 +114,41 @@ jobs:
               try:
                   print("🌐 Fetching homepage to initialize session and cookies...")
                   try:
-                      session.get("https://telegramdownloader.net/", timeout=10)
+                      session.get("https://telegramdownloader.net/", timeout=30)
                   except Exception as e:
-                      print(f"⚠️ Could not fetch homepage: {e}")
+                      print(f"⚠️ Could not fetch homepage (ignoring): {e}")
 
-                  print(f"🔗 Fetching download info from proxy...")
-                  resp = session.post(api_url, data=data, timeout=15)
+                  print(f"🔗 Fetching download info from proxy (this might take up to 2 minutes)...")
                   
-                  # در صورتی که سرور اروری داد، متن ارور را چاپ کند تا بدانیم مشکل چیست
+                  # سیستم تلاش مجدد برای دریافت لینک دانلود
+                  max_api_retries = 3
+                  resp = None
+                  for attempt in range(max_api_retries):
+                      try:
+                          # Timeout increased to 120 seconds
+                          resp = session.post(api_url, data=data, timeout=120)
+                          break
+                      except requests.exceptions.Timeout:
+                          print(f"⚠️ Timeout waiting for proxy (Attempt {attempt+1}/{max_api_retries}). Retrying...")
+                          time.sleep(5)
+                      except requests.exceptions.RequestException as e:
+                          print(f"⚠️ Request error (Attempt {attempt+1}/{max_api_retries}): {e}")
+                          time.sleep(5)
+                  
+                  if resp is None:
+                      print("❌ Failed to get response from proxy after all attempts.")
+                      return False, "", 0
+
                   if resp.status_code != 200:
                       print(f"❌ Server Error {resp.status_code}: {resp.text}")
                       return False, "", 0
                       
-                  result = resp.json()
+                  try:
+                      result = resp.json()
+                  except Exception as e:
+                      print(f"❌ Failed to parse JSON response. Server returned: {resp.text[:200]}")
+                      return False, "", 0
+
                   raw_url = result.get('data', {}).get('data', {}).get('link')
                   file_name = result.get('data', {}).get('data', {}).get('file_name')
                   
@@ -146,7 +160,6 @@ jobs:
                   print(f"📁 File: {file_name}")
                   print(f"🚀 Starting download with resume support...")
                   
-                  # ساخت هدر تمیز برای دانلود اصل فایل (بدون هدرهای API)
                   dl_headers = {"User-Agent": session.headers["User-Agent"]}
                   success = download_with_resume(raw_url, out_path, dl_headers)
                   
@@ -156,7 +169,7 @@ jobs:
                       return True, file_name, size
                   return False, "", 0
               except Exception as e:
-                  print(f"❌ Error: {e}")
+                  print(f"❌ Unexpected Error: {e}")
                   return False, "", 0
 
           if __name__ == "__main__":
@@ -197,7 +210,7 @@ jobs:
           FILE_SIZE="${{ steps.download.outputs.file_size }}"
           LIMIT=$((THRESHOLD * 1024 * 1024))
 
-          if[ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt "$LIMIT" ]; then
+          if [ -n "$FILE_SIZE" ] &&[ "$FILE_SIZE" -gt "$LIMIT" ]; then
             echo "✂️ File (${FILE_SIZE} bytes) exceeds ${THRESHOLD}MB, splitting into parts..."
             cd downloads
             zip -s "${THRESHOLD}m" "${FILENAME}.zip" -j "$FILENAME"
@@ -251,7 +264,7 @@ jobs:
           done
 
           TOTAL=${#NEW_FILES[@]}
-          if[ "$TOTAL" -eq 0 ]; then
+          if [ "$TOTAL" -eq 0 ]; then
             echo "✅ No new files to upload!"
             exit 0
           fi
