@@ -58,13 +58,20 @@ jobs:
                   try:
                       range_header = {"Range": f"bytes={downloaded}-"} if downloaded > 0 else {}
                       resp = session.get(url, stream=True, timeout=30, headers=range_header)
+                      
+                      # در صورتی که سرور از Resume پشتیبانی نکرد و از اول فایل را فرستاد
+                      if downloaded > 0 and resp.status_code == 200:
+                          downloaded = 0
+                          mode = 'wb'
+                      else:
+                          mode = 'ab' if downloaded > 0 else 'wb'
+                          
                       resp.raise_for_status()
                       
                       total_size = int(resp.headers.get('content-length', 0))
-                      if downloaded > 0:
+                      if total_size > 0 and downloaded > 0 and resp.status_code == 206:
                           total_size = total_size + downloaded
                       
-                      mode = 'ab' if downloaded > 0 else 'wb'
                       with open(temp_path, mode) as f:
                           for chunk in resp.iter_content(chunk_size=chunk_size):
                               if chunk:
@@ -93,25 +100,56 @@ jobs:
 
           def download_telegram_file(telegram_link, output_dir="."):
               api_url = "https://telegramdownloader.net/proxy.php"
-              headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+              
+              # استفاده از Session برای نگهداری کوکی‌ها
+              session = requests.Session()
+              
+              # هدرهای ضروری برای جلوگیری از خطای 400 و شبیه‌سازی مرورگر
+              session.headers.update({
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                  "Accept": "application/json, text/javascript, */*; q=0.01",
+                  "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                  "Origin": "https://telegramdownloader.net",
+                  "Referer": "https://telegramdownloader.net/",
+                  "X-Requested-With": "XMLHttpRequest",
+                  "Sec-Fetch-Dest": "empty",
+                  "Sec-Fetch-Mode": "cors",
+                  "Sec-Fetch-Site": "same-origin"
+              })
+              
               data = {"telegram_link": telegram_link}
               
               try:
-                  print(f"🔗 Fetching download info...")
-                  resp = requests.post(api_url, headers=headers, data=data, timeout=15)
-                  resp.raise_for_status()
+                  print("🌐 Fetching homepage to initialize session and cookies...")
+                  try:
+                      session.get("https://telegramdownloader.net/", timeout=10)
+                  except Exception as e:
+                      print(f"⚠️ Could not fetch homepage: {e}")
+
+                  print(f"🔗 Fetching download info from proxy...")
+                  resp = session.post(api_url, data=data, timeout=15)
+                  
+                  # در صورتی که سرور اروری داد، متن ارور را چاپ کند تا بدانیم مشکل چیست
+                  if resp.status_code != 200:
+                      print(f"❌ Server Error {resp.status_code}: {resp.text}")
+                      return False, "", 0
+                      
                   result = resp.json()
                   raw_url = result.get('data', {}).get('data', {}).get('link')
                   file_name = result.get('data', {}).get('data', {}).get('file_name')
+                  
                   if not raw_url or not file_name:
-                      print("❌ Could not extract download link or filename")
+                      print(f"❌ Could not extract download link. API Response: {result}")
                       return False, "", 0
                   
                   out_path = Path(output_dir) / file_name
                   print(f"📁 File: {file_name}")
                   print(f"🚀 Starting download with resume support...")
                   
-                  success = download_with_resume(raw_url, out_path, headers)
+                  # ساخت هدر تمیز برای دانلود اصل فایل (بدون هدرهای API)
+                  dl_headers = {"User-Agent": session.headers["User-Agent"]}
+                  success = download_with_resume(raw_url, out_path, dl_headers)
+                  
                   if success:
                       size = out_path.stat().st_size
                       print(f"✅ Download complete: {file_name} ({size/1e6:.2f} MB)")
@@ -129,7 +167,7 @@ jobs:
               out_dir = sys.argv[2] if len(sys.argv) > 2 else "."
               success, fname, fsize = download_telegram_file(link, out_dir)
               if success:
-                  with open(Path(out_dir) / ".download_info", "w") as info:
+                  with open(Path(out_dir) / ".download_info", "w", encoding="utf-8") as info:
                       info.write(f"{fname}\n{fsize}")
               sys.exit(0 if success else 1)
           EOF
@@ -159,7 +197,7 @@ jobs:
           FILE_SIZE="${{ steps.download.outputs.file_size }}"
           LIMIT=$((THRESHOLD * 1024 * 1024))
 
-          if [ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt "$LIMIT" ]; then
+          if[ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt "$LIMIT" ]; then
             echo "✂️ File (${FILE_SIZE} bytes) exceeds ${THRESHOLD}MB, splitting into parts..."
             cd downloads
             zip -s "${THRESHOLD}m" "${FILENAME}.zip" -j "$FILENAME"
@@ -172,8 +210,7 @@ jobs:
       - name: 🔄 Sanitize filenames (remove non‑ASCII / special characters)
         run: |
           cd downloads
-          for file in *; do
-            [ -e "$file" ] || continue
+          for file in *; do[ -e "$file" ] || continue
             EXT="${file##*.}"
             if [[ "$EXT" == "$file" ]]; then
               EXT="bin"
@@ -184,10 +221,10 @@ jobs:
               echo "   🌐 Renaming: $file -> $NEW_NAME"
               mv "$file" "$NEW_NAME"
             else
-              CLEAN_NAME=$(echo "$file" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g')
-              if [ "$file" != "$CLEAN_NAME" ]; then
-                echo "   📝 Cleaning: $file -> $CLEAN_NAME"
-                mv "$file" "$CLEAN_NAME"
+              CLEAN_NAME=(echo"(echo "file" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g')
+              if [ "file"!="file" != "CLEAN_NAME" ]; then
+                echo "   📝 Cleaning: file−>file -> CLEAN_NAME"
+                mv "file""file" "CLEAN_NAME"
               fi
             fi
           done
@@ -198,14 +235,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if [ ! -d "downloads" ] || [ -z "$(ls -A downloads 2>/dev/null)" ]; then
+          if [ ! -d "downloads" ] ||[ -z "$(ls -A downloads 2>/dev/null)" ]; then
             echo "⚠️ No files to upload!"
             exit 1
           fi
 
           NEW_FILES=()
           for file in downloads/*; do
-            filename=$(basename "$file")
+            filename=(basename"(basename "file")
             if ! git ls-files --error-unmatch "downloads/$filename" &>/dev/null; then
               NEW_FILES+=("$filename")
             else
@@ -214,7 +251,7 @@ jobs:
           done
 
           TOTAL=${#NEW_FILES[@]}
-          if [ "$TOTAL" -eq 0 ]; then
+          if[ "$TOTAL" -eq 0 ]; then
             echo "✅ No new files to upload!"
             exit 0
           fi
@@ -225,9 +262,9 @@ jobs:
 
           for (( i=0; i<TOTAL; i++ )); do
             echo ""
-            echo "🚀 Uploading $((i+1)) of $TOTAL: ${NEW_FILES[$i]}"
-            git add "downloads/${NEW_FILES[$i]}"
-            git commit -m "Add ${NEW_FILES[$i]} [skip ci]"
+            echo "🚀 Uploading ((i+1))of((i+1)) of TOTAL: {NEW_FILES[{NEW_FILES[i]}"
+            git add "downloads/{NEW_FILES[{NEW_FILES[i]}"
+            git commit -m "Add {NEW_FILES[{NEW_FILES[i]} [skip ci]"
 
             for attempt in 1 2 3; do
               if git push origin main 2>&1; then
@@ -239,7 +276,7 @@ jobs:
                   git reset --soft HEAD~1
                   sleep 5
                 else
-                  echo "   ❌ Failed to upload ${NEW_FILES[$i]}"
+                  echo "   ❌ Failed to upload {NEW_FILES[{NEW_FILES[i]}"
                   git reset --soft HEAD~1
                 fi
               fi
